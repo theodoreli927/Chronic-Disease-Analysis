@@ -4,6 +4,8 @@ Here is a analysis of the Chronic Disease Indicators (2023) dataset sourced from
 
 ## Chronic-Kidney-Disease.html
 A dashboard generated using flex-dashboard to knit into a html file.
+To view the dashboard you will need to download the file then open it to display the dashboard.
+
 In the dashboard you will find 6 model fits: Multiple Regression, Ridge Regression, LOESS, K-Nearest Neighbors, Naive Bayes, Logistic Regression.
 Each of the fits corresponds to a distinct research question we are attempting to answer from the dataset. 
 After each of the model fits we proceed with a in-depth analysis on what we can conclude about the data, 
