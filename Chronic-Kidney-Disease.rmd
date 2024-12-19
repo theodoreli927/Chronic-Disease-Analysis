@@ -1,0 +1,1116 @@
+---
+title: "Analysis on Chronic Disease Indicators Data using numerous classification and regression techniques"
+authors: "Ted Li and Devanshu Khadka" 
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: scroll
+    theme: bootstrap
+   # self_contained: true
+subtitle: ""
+---
+
+```{r setup, include=FALSE}
+# Load necessary libraries and set global options
+library(knitr)
+library(ggplot2)
+library(glmnet)
+library(MASS)
+library(dplyr)
+library(caret)
+library(class)
+library(e1071)
+library(broom)
+library(kableExtra)
+
+
+# Set options for knitr
+knitr::opts_chunk$set(echo = TRUE, 
+                      comment = NA,
+                      fig.path = "./figures/", 
+                      fig.align = "center",
+                      fig.width = 7,
+                      fig.height = 7,
+                      message = FALSE,
+                      warning = FALSE)
+
+```
+
+
+Introduction
+===================================== 
+<!-- Page Done by Theodore and Devanshu -->
+
+### Abstract
+
+This project, developed by Theodore Li and Devanshu Khadka, applies six distinct modeling techniques to analyze chronic disease indicators across the United States. The dataset, sourced from the CDC, includes variables such as alcohol use, smoking habits, BMI, and a wide range of chronic diseases (e.g., asthma, diabetes, cancer). The models shown cover both regression and classification methods, including Multiple Regression, Ridge Regression, LOESS fit, k-NN Classification, Naive Bayes Classification, and Logistic Regression. The primary aim is to examine the predictive power of demographic and geographic factors on various health outcomes, focusing on mortality rates and hospitalization likelihood.
+
+Upon trial and error, the supervised learning methods are deemed improper for the data as none of the performance was up to standard despite optimization. However, The unsupervised performance were promising.
+
+Through trial and error, the supervised learning methods, despite extensive optimization, struggled to achieve satisfactory performance on this dataset. However, the unsupervised learning methods, particularly k-NN classification, displayed greater potential in capturing the underlying patterns, offering a more promising approach for the given data characteristics.
+
+### Overview
+The area of focus for this project is 6.) Health/Healthcare. 
+
+The data was obtained from the CDC: Center for Disease Control and Prevention and includes chronic disease indicators prior to 2024.
+
+This dataset contains 124 indicators, such as alcohol use, smoking habits, BMI, and chronic diseases like Asthma, Diabetes, and Cancer. Each indicator group includes multiple related questions, covering metrics like mortality rates, hospitalization numbers, and emergency department visit rates.
+
+
+### Data Source
+The full dataset can be accessed directly from CDC’s resources. It provides key insights into chronic disease trends across various demographics and locations in the United States. 
+
+The raw data has 1.19M entries and 34 columns
+
+
+```{r echo = FALSE} 
+library(htmltools)
+
+site_link <- tags$a(href = "https://data.cdc.gov/Chronic-Disease-Indicators/U-S-Chronic-Disease-Indicators-CDI-2023-Release/g4ie-h725/about_data",
+                  "Click here to reach the site to obtain the data"
+)
+
+# Create a link with a renamed file
+download_link <- tags$a(
+  href = "https://data.cdc.gov/api/views/g4ie-h725/rows.csv?accessType=DOWNLOAD",
+  download = "Chronic_Disease_Indicators.csv",  # Suggested filename
+  "Click here to download the data"
+)
+
+# Output the links as HTML to ensure they are rendered correctly
+site_link_html <- HTML(as.character(site_link))
+download_link_html <- HTML(as.character(download_link))
+
+site_link_html_with_break <- paste(site_link_html, "<br>", download_link_html)
+
+# Display the HTML links with the line break
+HTML(site_link_html_with_break)  
+```
+
+
+
+### Data Dictionary
+
+YearStart: (Numeric) Starting year of data collection
+
+YearEnd: (Numeric) Ending year of data collection
+
+LocationAbbr: (text) U.S. State Abbreviation 
+
+LocationDexc: (text) Location Description
+
+DataSource: (text) Data Source
+
+Topic: (text) topic of study
+
+Question: (text) Question relating to the topic
+
+Response: (text) Response of patient
+
+DataValueUnit: (text) Unit of collected Data Value
+
+DataValueType: (text) What type of data is collected (numerical, character, etc)
+
+DataValue: (text) Data Value
+
+DataValueFootnoteSymbol: (text) data value footnote symbol
+
+LowConfidenceLimit: (Numeric) Lower bound of 95% confidence interval
+
+HighConfidenceLimnit: (Numeric) Upper bound of 95% confidence interval
+
+StratificationCategory1: (text) First category used for grouping
+
+Stratification1: (text) assigned group based on StratificationCategory1
+
+StrateficationCategory2: (text) Second category used for grouping
+
+Stratification2: (text) assigned group based on StrateficationCategory2
+
+
+
+```{r echo = FALSE}
+file_path <- list.files(pattern = "Chronic_Disease_Indicators", full.names = TRUE)
+
+data <- read.csv(file_path)
+```
+
+
+
+
+
+### Data Cleaning
+
+
+Let's take a look at how many entries pertain to each Topic that we can work with
+```{r echo = FALSE}
+library(dplyr)
+
+class_counts <- data %>%
+  group_by(Topic) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+kable(class_counts)
+```
+
+
+Let's get rid of redundant columns. 
+
+Knowing where we got the data won't help us make a better prediction as all DataSources are the same so we can drop the DataSource column.
+
+Additionally, there are redundant identification number columnns like LocationID, TopicID, QuestionID, DataValueTypeID that we can drop.
+
+StratificationCategoryID1 is referring to the exact same information as StratificationCategory1, thus we can drop both identification columns for stratification.
+
+Finally, there are the columns that contain NA values like ResponseID, and Stratification3 which we will drop as it won't contribute anything to the model.
+
+Since we'll be using this data cleaning process multiple times but for different topics of interest, let's make a function to remove redundancy in our data cleaning. 
+
+```{r data_clean}
+#' Function cleans Chronic-Kidney-Disease.csv data and divides it into a smaller datasets for train and test subsets
+#' 
+#' @param relevant_columns a list of columns that we want to keep
+#' @param topic The topic that we want to use (i.e. Cancer, Asthma, Tobacco, Alcohol, Cardiovascular Disease, etc)
+#' @param question The question we want to answer that is relevant to our topic
+#' @param StratificationCategory1 The grouping we want to use to make it consistent in our cleaned dataset
+#' @param DataValueType The response variable that we are trying to predict, again to make it consistent in our dataset
+#' 
+#' @return A list contiaining:
+#' - cleaned_data: Complete dataset after filtering what we want based on parameters
+#' - train_data: Random 70% of the cleaned_data to be used for training
+#' - test_data: Random 30% of cleaned_data to be used for testing
+#' 
+clean_data <- function(relevant_columns, topic, question, StratificationCategory1, DataValueType){
+  # First, We want to make sure the data we're working with is grouped under the same strata and that we're working with the same data value type
+  #Additionally we want to filter the data into the topic, and question of interest, and make sure our Stratification and DataValueType is consistent all based on input parameters.
+  cleaned <- data[data$Topic == topic & data$Question == question & data$StratificationCategory1 == StratificationCategory1 & data$DataValueType == DataValueType, ]
+  
+  #Next remove redundant columns by only extracting the columns with relevant information
+  cleaned <- cleaned[, relevant_columns]
+  
+  # Extract X and Y coordinates using gsub
+
+  #Used this post: https://stackoverflow.com/questions/14543627/extracting-numbers-from-   vectors-of-strings
+  # to extract the numbers from strings
+  #We want to extract the specific X coordinates and Y coordinates into respective numeric columns instead of having them under a single column as a string.
+  cleaned$X_coor <- as.numeric(gsub("POINT\\s*\\(([-]?[0-9.]+)\\s[-]?[0-9.]+\\)", "\\1", cleaned$GeoLocation))
+cleaned$Y_coor <- as.numeric(gsub("POINT\\s*\\([-]?[0-9.]+\\s([-]?[0-9.]+)\\)", "\\1", cleaned$GeoLocation))
+
+#We can now get rid of the GeoLocation column
+cleaned <- subset(cleaned, select = -GeoLocation)
+
+#Turn those categorical columns into numeric columns
+cleaned$LocationAbbr <- as.numeric(factor(cleaned$LocationAbbr))
+cleaned$Stratification1 <- as.numeric(factor(cleaned$Stratification1))
+cleaned$DataValue <-
+as.numeric(factor(cleaned$DataValue))
+
+#Split into 70% train 30% test
+set.seed(123)
+n <- nrow(cleaned)
+
+#Randomly draw 70% of row indexes for training
+row_indices <- sample(1:n, size = floor(0.7 * n), replace = FALSE)
+
+train_data <- cleaned[row_indices, ]      
+test_data <- cleaned[-row_indices, ]
+
+ # Return both complete cleaned data, along with train and test subsets
+  return(list(
+    cleaned_data = cleaned,
+    train_data = train_data,
+    test_data = test_data
+  ))
+}
+```
+
+Now our data is ready to be used in a model.
+
+
+
+Multiple regression
+=====================================  
+<!-- Page Done by Theodore -->
+
+
+### Research Question: What is the average annual number of mortality due to cancer of the colon and rectum?
+
+Colorectal cancer (cancer from colon and rectum) is the third leading cause of cancer related death among men and the fourth leading cause among women [1]. However, in recent years the death rate has been dropping for several decades. This is due to this cancer being highly treatable and often curable if identified at the early stages. Thus, the goal of the section is to accurately identify the average annual number of mortality due to cancer of the colon and rectum to give those individuals a cautious warning if the prediction is high.
+
+### Data Preprocessing
+
+First, we'll use the clean_data() function initialized in the introduction to get rid of redundant columns and to convert all data values into numeric values which can be properly interpreted by our model.
+
+Next, we'll look at more specific areas of the data that needs modifications due to the specific research question we are working with.
+The main area of concern is removing the Year Start and Year End columns.
+
+The reason why we can't include the Year Start and Year End columns is because in practical use, we're making real time predictions of the data therefore we can't have our model exhibit a time dependency as this information will not be available.
+It's pointless to make a prediction on the average annual mortality rates of a previous when we know the exact number.
+
+Using the cleaned data, the value we're predicting is DataValue which represents the annual mortality given other specific parameters. 
+Since this is done in multiple regression I will use the lm() function to fit the linear model which allows for multiple parameters to be included in the model.
+
+```{r}
+cancer_specific_data_list <- clean_data(c(3,11,18,23), "Cancer", "Cancer of the colon and rectum (colorectal), mortality", "Gender", "Average Annual Number")
+
+#Extracting the train, and test splits
+cancer_specific_data <- cancer_specific_data_list$cleaned_data
+train_data <- cancer_specific_data_list$train_data
+test_data <- cancer_specific_data_list$test_data
+
+```
+
+Now our data is ready to be used in a model.
+
+### Initial fitting and summary
+```{r}
+multiple_reg_model <- lm(DataValue ~ ., data = cancer_specific_data)
+```
+
+```{r echo=FALSE}
+summary_table <- tidy(multiple_reg_model)
+kable(summary_table)
+
+```
+We can see that LocationAbbr, has a really high p-value and a really small estimate coefficient. This hints at the variable potentially being redundant and not contributing to our model.
+
+Given that we choose our significance level to be 0.05, all other features have a p-value low enough that we can reject the null hypothesis of the coefficient being 0. Regardless we'll do further feature analysis to determine what to use.
+
+### AIC for feature extraction
+
+Let us use AIC for feature selection to determine if that really is the case and which features to use.
+```{r echo=FALSE}
+stepwise_model <- stepAIC(multiple_reg_model, direction = "both")
+summary(stepwise_model)
+```
+Our initial model had LocationAbbr, Stratification1, X_coor, and Y_coor with AIC of 8196.48. By using AIC we evaluate our model based on starting off including all features (LocationAbbr, Stratification1, X_coor, Y_coor) then removing each parameter one at a time we are able to gauge the parameter that causes the greatest decrease in AIC, determining the unnecessary parameter.
+
+The only feature that lowers the AIC when removed was LocationAbbr. This indicates that LocationAbbr added unnecessary complexity to the model without increasing the model's fit. 
+Thus, we can see LocationAbbr was removed therefore this leaves us  with parameters Stratification1, X_coor, and Y_coor. 
+
+### Analysis of AIC
+Using the feature reduced model, let's attempt another linear regression fit with these features. This final model uses the features: Stratification1 (the gender), X_coor, Y_coor
+Additionally, we'll visualize our model. 
+Let's look at our fit using the X coordinate to the Data Value.
+
+### Plot of of Data Value vs X Coordinate
+
+```{r echo = FALSE}
+feature_extracted_model <- lm(DataValue ~ LocationAbbr + X_coor + Y_coor, data = cancer_specific_data)
+
+plot(cancer_specific_data$X_coor, cancer_specific_data$DataValue,
+     xlab = "X Coordinate", 
+     ylab = "Data Value", 
+     main = "Data Value vs. X Coordinate",
+     ylim = c(0, 550))
+
+# Add the regression line
+abline(feature_extracted_model, col = "blue")
+
+
+
+```
+
+### Plot of of Data Value vs Y Coordinate
+
+```{r echo = FALSE}
+plot(cancer_specific_data$Y_coor, cancer_specific_data$DataValue,
+     xlab = "Y Coordinate", 
+     ylab = "Data Value", 
+     main = "Data Value vs. Y Coordinate",
+     ylim = c(0, 550))  # Set your desired limits for the Y-axis
+
+# Add the regression line
+abline(feature_extracted_model, col = "blue") 
+```
+
+
+### Results 
+
+We can see, it's hardly a linear fit between X Coordinate and the Data Value, thus our least squares regression line appears practically horizontal. 
+
+As expected, if the X Coordinate didn't share a linear relationship with mortality rates then it's unlikely that Y Coordinates will exhibit a relationship either. 
+
+### Analysis of residuals
+Let's take a deeper analysis of the residuals to determine whether or not a linear relationship is. A residual plot gives us a quick visual assessment on how well the model fits the data. If the data doesn't violate any assumptions about simple linear regression then there shouldn't be any trends or patterns in the scatterplot.
+
+### Residual Plot
+```{r echo=FALSE}
+# Plot residuals
+plot(feature_extracted_model$fitted.values, feature_extracted_model$residuals,
+     xlab = "Fitted Values", 
+     ylab = "Residuals", 
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red")
+```
+
+### Result
+Looking at the plot we can see a clear clustering of data points toward the right side. This indicates a unevenness in the distribution of the prediction variable, mortality rates due to cancer of rectum and colon.
+The cluster of the residuals indicates that it is possible that the observations are not independent of one another. In our case, since we are using X and Y coordinates as features, observations close to the same coordinates may experience more similar predictions. This violates the assumption of independent observations for a simple linear regression.
+
+### QQ Plot
+
+Let's look at a QQ plot of the residuals to assess the normality of the residuals
+
+###
+```{r echo=FALSE}
+qqnorm(feature_extracted_model$residuals)
+qqline(feature_extracted_model$residuals, col = "red")
+
+```
+
+### Results
+
+We can see a S shape meaning a strong deviation on the right tail going underneath the diagonal line and the left tail going above the diagonal. This indicates the residuals have much heavier upper and lower tails than what is expected with a normal distribution.
+The data in the center is normally distributed but there are more extreme values on the left and right ends than in a normal distribution. 
+
+This breaks the assumption of normality and suggests that the linear model is not able to fully represent the relationship between the predictors and Data Value. 
+
+Therefore a linear fit is not ideal for our scenario.
+
+### Model Evaluation
+
+We've concluded that our multiple linear model provides a poor fit due to the lack of linear relationship between the predictors and the Data Value. 
+
+
+```{r echo=FALSE}
+
+summary(feature_extracted_model)
+kable(summary_table, 
+      caption = "Summary of Multiple Regression Model",  
+      digits = 3,  
+      col.names = c("Term", "Estimate", "Std. Error", "t-value", "p-value") 
+)
+
+
+```
+
+Model Performance: Based on the Multiple R-Squared, the model explains 3.27% of the total variation found in Data Value (annual number of mortality due to cancer of the colon and rectum)
+The RSE indicates the average distance of the true values that fall from the least regression line by the model. Therefore, on average the annual number of mortality due to cancer of the colon and rectum true values are off by the fitted line by 151.6 cases. This is extremely high and deems our model impractical for any reliable prediction.
+
+
+Insights on Predictors: p-value: 5.832e-06: The p-value is small enough to indicate that the features we have chosen are statistically significant to the model. Looking at the table for the features we have chosen we can see all corresponding p-values are small enough to be deemed as statistically significant.
+
+The model's poor performance even after using AIC for feature extraction is likely due to the non linear relationship exhibited between the predictors we have chosen and the Data Value. To obtain better performance we would need to make a transformation of the data to introduce a nonlinear component to get better predictions or consider the use of a nonlinear model.
+
+
+Ridge Regression fit
+=====================================   
+<!-- Page By Theodore -->
+
+
+### Research Question: How many cases, out of 100,000, for Chronic liver disease mortality is caused by alcohol consumption?
+
+
+Alcohol-related liver disease causes liver damage due to excessive drinking and is most common in people between 40 and 50. This is due to this occurrence appearing most prominently after years of drinking. The risk factors that are associated with alcohol related liver diseases is age, sex, obesity, amount of alcohol consumption, and genetics [2]. 
+
+
+Therefore, by identifying information on individuals, we are going to give a estimate on the mortality cases, out of 100,000, of chronic disease mortality due to alcohol consumption. If the prediction is high, this will provide those who fit the category more caution on their drinking habits.
+
+### Preprocessing
+
+We will use the clean_data function to extract the necessary information from the dataset.
+
+We will use Age-Adjusted Rate as the Data Value Type for predicting Chronic liver disease mortality as it is a lot more likely for older individuals to experience compared to younger people. Thus if we were to use the raw data then it's likely that we'll overestimate the mortality rates in older populations and under estimate the younger population due to the uneven distribution of the data.
+
+This adjustment allows for the mortality rates to be compared as though the population had the same age distribution, giving us a more clear result. 
+
+```{r}
+alcohol_data_list <- clean_data(c(3,11,18,23), "Alcohol", "Chronic liver disease mortality", "Gender", "Age-adjusted Rate")
+
+
+alcohol_specific_data <- alcohol_data_list$cleaned_data
+train_data <- alcohol_data_list$train_data
+test_data <- alcohol_data_list$test_data
+```
+
+
+
+### Initial Ridge Regression model fitting
+
+We will begin the ridge regression process using the `glmnet` package. This package allows us to choose between Ridge and Lasso regularization.
+
+- Lasso adds a penalty proportional to the absolute value of coefficients, which can effectively remove certain features by setting coefficients to zero.
+- Ridge adds a penalty proportional to the square of the coefficients, shrinking them towards zero but not entirely removing them therefore all features will provide some level of contribution to our model.
+
+For our model, we’ll use Ridge Regression, ensuring every predictor has an effect on the fitted values.
+
+
+```{r }
+library(glmnet)
+
+#All columns except column 3 are predictors
+x_train <- as.matrix(train_data[, -3])
+#Column 3 is the value we're truing to predict
+y_train <- as.matrix(train_data[, 3])
+
+#Get the feature columns from the testing dataset
+x_test <- as.matrix(test_data[, -3])
+
+#Get the label columns from the testing dataset
+y_test <- as.matrix(test_data[, 3])
+
+
+
+#Initial fit with the ridge regression across a range of lambda values
+ridge_model <- glmnet(x_train, y_train, alpha = 0)
+
+```
+
+### Determining Tuning Parameter
+
+We need to determine the best tuning parameter to find the proper coefficients for each predictor.
+To do this we will use Cross-validation:
+This splits the data into different pieces and trains on selected pieces while tests on the remaining unseen pieces.
+This is repeated multiple times where each piece is used as the testing piece once. 
+
+I will be using cv.glmnet() which performs k-fold cross validation with k=10 folds by default. 
+Thus, we will iterate through the data 10 times with each iteration using all values of \lambda. 
+
+In the end we select the value for \lambda that corresponds to the lowest average error.
+
+Another method for determining the value for \lambda is to use lambda.1se which selects the largest value for \lambda within 1 standard error from the minimum value. This results in a \lambda that has less variance and a bigger value thus giving the coefficients less significance resulting in a potentially more simpler model. This is the method when striving for the bias-variance tradeoff where you are looking for minimal bias and variance at the same time to create a more regularized model.
+
+### CV to find tuning parameter
+```{r echo}
+cv_ridge_model <- cv.glmnet(x_train, y_train, alpha = 0)
+# Get the best lambda value based on cross-validation
+best_lambda <- cv_ridge_model$lambda.min
+print(paste("The value of our tuning parameter is:", best_lambda))
+```
+Now we've determined our best tuning parameter but let's visualize the effect of \lambda on the MSE by plotting our cross validation model. 
+
+
+### CV Plot
+
+```{r echo = FALSE}
+# Plot the cross-validation results to visualize the optimal lambda
+plot(cv_ridge_model)
+
+```
+
+### Results
+
+Looking at this plot we see the mean squared error as we go through the Log \lambda throughout all values of \lambda.
+Notably, we observe a S shaped curve meaning that the smaller values of \lambda results in lower mean-squared error across all folds of the dataset. However with a smaller MSE also means greater variance as we see through the vertical lines. As the value of \lambda increases so does the MSE but variance decreases drastically.
+
+### Table of finalized model
+
+```{r echo = FALSE}
+# Refit the model using the best lambda
+final_ridge_model <- glmnet(x_test, y_test, alpha = 0, lambda = best_lambda)
+feature_names <- rownames(coef(final_ridge_model))
+
+ridge_coefficients <- as.vector(coef(final_ridge_model))
+
+ols_model <- lm(y_train ~ x_train)
+ols_coefficients <- as.vector(coef(ols_model))
+
+#Calculate the difference between original coefficients and tuned coefficients from RIDGE
+shrinkage_effect <- ols_coefficients - ridge_coefficients
+
+# Make predictions and calculate mse
+ridge_predictions <- predict(ridge_model, s = best_lambda, newx = x_test)
+mse <- mean((y_test - ridge_predictions)^2)
+
+summary_table <- data.frame(
+  Feature = feature_names,
+  OLS_Coefficient = ols_coefficients,
+  Ridge_Coefficient = ridge_coefficients,
+  Shrinkage_Effect = shrinkage_effect
+)
+
+# Display the summary table with feature names
+kable(summary_table, 
+      caption = "Coefficients of Ridge Regression Model",  
+      digits = 3  
+)
+
+
+```
+Looking at this table we see the OLS (Ordinary Least Squares) coefficient used in a standard linear model.
+We then extracted the corresponding Ridge coefficient for each feature for analysis and to calculate the shrinkage effect used by the ridge regression model.
+Most evidently, the coefficient for Location_Abbr was changed from a positive coefficient to a negative coefficient meaning that the ridge regression has altered the relationship between that feature and the Mortality Rate. A possible reason for flipping the sign is due to multicollinearity as LocationAbbr corresponds to the state of the data sample which directly corresponds to the X_coor and Y_coor of the data sample, (Each state can only contain specific coordinates). Therefore it is likely that ridge regression is attempting to remove LocationAbbr due to redundency. 
+
+### Evaluation
+Now that we've determined the value of the \lambda to use as the tuning parameter and refit our model, let's analyze the new performance metrics.
+```{r echo = FALSE}
+
+
+#All columns except column 3 are predictors
+x_test <- as.matrix(test_data[, -3])
+#Column 3 is the value we're truing to predict
+y_test <- as.matrix(test_data[, 3])
+
+predictions <- predict(final_ridge_model, newx = x_test) 
+predictions_vector <- as.vector(predictions)
+
+y_test <- as.vector(y_test) 
+
+
+avg_res <- mean(abs(predictions_vector - y_test))
+
+mape <- mean(abs(predictions_vector - y_test) / abs(y_test)) * 100
+
+#Calculate MSE: Mean Squared Error
+mse <- mean((predictions_vector - y_test)^2)
+#Calculate RMSE: Root Mean Squared Error
+rmse <- sqrt(mse)
+#Calculate R squared
+r_squared <- 1 - (sum((y_test - predictions_vector)^2) / sum((y_test - mean(y_test))^2))
+
+cat("Avg Residuals:", avg_res, "\n")
+cat("Mean Absolute Percentage Error:", mape, "% \n")
+
+cat("Mean Squared Error (MSE):", mse, "\n")
+cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+cat("R-squared:", r_squared, "\n")
+```
+The results from the testing set show much greater performance compared to our model from Multiple Regression but there is still a lot of room for improvement. Specifically, our model only explains 43.3% of the variance in the response variable (Chronic Liver Disease mortality cases caused by alcohol per 100,000 cases).
+
+Looking at the coefficients, we can see the coefficients corresponding to YearStart and Stratification are the highest in absolute value thus indicating that these features are most impact to the model for making predictions. 
+
+Looking at the average residuals, we can see that on average our predictions differ from the real data value that we're trying to predict by 35.75452. This means that for every prediction value made the real value is \pm 29.5 cases
+
+Let's further analyze this difference with mean absolute percentage error: where I took the average_residuals divided by the absolute value of the true data values and multiplied by 100 to get the result in percentage form. The result was 22.13601% meaning that our predictions are off by 22.13601% of the true data value.
+
+This is way too high for our model to be practical in making predictions. In a ideal scenario where our predictions would match the true values would give us a absolute percentage error of 0.
+
+LOESS fit
+=====================================   
+<!-- Page By Theodore -->
+
+
+
+### Research Question What is the mortality rate due to heart failure?
+
+Heart failure mortality rates vary depending on the age, sex, and lifestyle habits of the individual. A study found that the mortality rate for heart failure has been increasing within the past decade and that the greatest increase were among men aged 45-65 [3].
+
+
+To combat this, hopefully this model would give a accurate prediction of the mortality rate for people to be more cautious about their lifestyle and dietary habits.
+
+### Preprocessing
+
+Next we will perform a LOESS fit to attempt a nonlinear model fitting technique. We've already determined in the Multiple Regression section that a linear fit is not appropriate. Now, rather than using least regression line for predictions we'll attempt at using a smooth curve that can perhaps capture more information in the data set as we seek the proper balance between variance-bias. 
+
+First we must prepare the data by splitting into the 70/30 split for training and testing to get a accurate representation of real world performance on our model. Keeping in mind that LOESS models performs best with lower dimensional data, we want to limit the features used to the ones that are necessary to the model.
+
+```{r}
+alcohol_data_list <- clean_data(c(3,11,18,23), "Cardiovascular Disease", "Mortality from heart failure", "Gender", "Number")
+
+
+alcohol_specific_data <- alcohol_data_list$cleaned_data
+train_data <- alcohol_data_list$train_data
+test_data <- alcohol_data_list$test_data
+
+```
+
+### Model Fitting and optimization
+
+We will use a sequence of spans from .25 to 1 iterating by .05 each time to determine the best loess model based on bias-variance trade off. We will build the model based on the train_data but assess the performance using MSE based off the test_data.
+
+```{r}
+test_MSE_values <- numeric()
+
+
+# Assuming train_data is your dataset with 'DataValue' as the response variable
+for (i in seq(0.25, 1, by = 0.05)) {
+  # Fit LOESS model with different span values
+  output <- loess(DataValue ~ ., data = train_data, degree = 1, span = i)
+  
+  test_predictions <- predict(output, newdata = test_data)
+  
+  MSE_test <- mean((test_predictions - test_data$DataValue)^2)
+  test_MSE_values <- c(test_MSE_values, MSE_test)
+  
+}
+
+# Find the best model based on the lowest test MSE
+best_span_index <- which.min(test_MSE_values)
+best_span <- seq(0.25, 1, by = 0.05)[best_span_index]
+cat("The best model is with span =", best_span, "which gives the lowest test MSE of: ", min(test_MSE_values),"\n")
+
+```
+
+Now let's attempt this same process with degree = 2
+```{r}
+test_MSE_values <- numeric()
+
+
+# Assuming train_data is your dataset with 'DataValue' as the response variable
+for (i in seq(0.5, 1.5, by = 0.05)) {
+  # Fit LOESS model with different span values
+  output <- loess(DataValue ~ ., data = train_data, degree = 2, span = i)
+  
+  test_predictions <- predict(output, newdata = test_data)
+  
+  MSE_test <- mean((test_predictions - test_data$DataValue)^2)
+  test_MSE_values <- c(test_MSE_values, MSE_test)
+  
+}
+
+# Find the best model based on the lowest test MSE
+best_span_index <- which.min(test_MSE_values)
+best_span <- seq(0.5, 1.5, by = 0.05)[best_span_index]
+cat("The best model is with span =", best_span, "which gives the lowest test MSE of: ", min(test_MSE_values),"\n")
+
+```
+So the loess model using degree of 2 is able to achieve a smaller MSE on the test_data although the difference is small. 
+
+
+### Plot Degree 1 Span 0.3
+
+```{r echo = FALSE}
+x <- test_data$X_coor
+y <- test_data$DataValue
+
+# Fit the LOESS model on the training data with the best performing parameters
+span <- 0.3
+degree <- 1
+loess_model_deg1 <- loess(DataValue ~ ., data = train_data, degree = degree, span = span)
+
+# Get fitted values for the test data
+fitted_values <- predict(loess_model_deg1, newdata = test_data)
+
+# Create a new data frame containing x, y (actual values), and the fitted values
+plot_data <- data.frame(x = x, y = y, fitted_values = fitted_values)
+
+# Create the plot
+plot <- ggplot(data = plot_data, aes(x = x, y = y)) +
+  geom_point(color = "blue") +  # Scatter plot of actual values
+  geom_line(aes(y = fitted_values), color = "red", lwd = 1.5) +  # Fitted values line
+  xlab("X Coordinate") +
+  ylab("Mortality Rate") +
+  annotate("text", 
+           x = max(x), y = max(y), 
+          label = "",  
+           hjust = 1, vjust = 1, 
+           size = 4, color = "black", fontface = "bold")
+
+# Print the plot
+print(plot)
+
+```
+
+### Plot Degree 2 Span 0.95
+
+```{r echo = FALSE}
+x <- test_data$X_coor
+y <- test_data$DataValue
+
+# Fit the LOESS model on the training data with the best performing parameters
+span <- 0.95
+degree <- 2
+loess_model_deg2 <- loess(DataValue ~ ., data = train_data, degree = degree, span = span)
+
+# Get fitted values for the test data
+fitted_values <- predict(loess_model_deg2, newdata = test_data)
+
+# Create a new data frame containing x, y (actual values), and the fitted values
+plot_data <- data.frame(x = x, y = y, fitted_values = fitted_values)
+
+# Create the plot
+plot <- ggplot(data = plot_data, aes(x = x, y = y)) +
+  geom_point(color = "blue") +  # Scatter plot of actual values
+  geom_line(aes(y = fitted_values), color = "red", lwd = 1.5) +  # Fitted values line
+  xlab("X Coordinate") +
+  ylab("Mortality Rate") +
+  annotate("text", 
+           x = max(x), y = max(y), 
+          label = "",  
+           hjust = 1, vjust = 1, 
+           size = 4, color = "black", fontface = "bold")
+
+# Print the plot
+print(plot)
+
+```
+
+###  Evaluation
+
+Our final model with the best performance uses the following features to predict Data Value (Mortality Rate): LocationAbbr (State Abbreviation), Stratification1 (Gender), X_coor, Y_coor
+
+
+We notice a stark difference in plots. Keep in mind that the plot of degree = 2 performs slightly better. The better performance is likely due the higher peaks and drops when given that degree = 2 enabling more flexibility within the model. However, we can see that this fit is still not optimal as there are large gaps in the dataset which is compromised by the LOESS model as it attempts to make a continuous curve to predict all values.  
+
+### Results
+
+```{r echo = FALSE}
+# Summary statistics about the LOESS fit
+loess_summary <- summary(loess_model_deg2)
+
+
+# Making predictions on the testing  data for evaluation
+predicted_values <- predict(loess_model_deg2, newdata = test_data)
+
+MSE_test <- mean((predicted_values - test_data$DataValue)^2)
+
+
+# Calculate residuals (errors)
+residuals <- test_data$DataValue - predicted_values
+# Calculate Mean Error (ME)
+mean_error <- mean(residuals)
+
+
+r_squared <- 1 - sum((residuals)^2) / sum((test_data$DataValue - mean(test_data$DataValue))^2)
+
+# Create a summary table
+summary_table <- data.frame(
+  Parameter = c("Span", "Degree", "MSE (Test)", "MAE (Test)", "R-squared (Test)"),
+  Value = c(span, degree, MSE_test, mean_error, r_squared)
+)
+
+kable(summary_table, 
+      caption = "Summary Table for LOESS",  # Add a caption
+      digits = 3,  # Round to 3 decimal places
+)
+
+```
+Based on model selection we chose the loess model which gives us the lowest MSE: 63519.73
+
+
+This means on average the actual mortality from heart failure differs from the loess line by 35.326 cases. 
+
+
+Additionally our loess model only explains 25.5% of the total variance in the data.
+
+
+### Analysis
+
+The model is performing poorly despite optimizing the span and degree of the model. It is likely due to the nature of the data containing many outliers both among the X_coordinates and Y_coordinates which can be seen in the 2 plots under Multiple Regression. Thus, it is difficult for a LOESS model to make accurate predictions. Even by doing a visual inspection of the LOESS plots from degree 1 and 2, we can see that the least regression line does not fit to the data well despite tuning the value for span and degree to achieve the best results. Looking at the plots it seems that the polynomial degree is not enough to properly gauge the best predictions. We conclude that using a line or a curve does not give accurate predictions for the model. The next step would be to use a unsupervised learning method on this dataset, where we gauge the prediction based on proximity of nearby data points rather than constructing a line or a curve.
+
+
+K-Nearest Neighbors Classification 
+===================================== 
+
+<!-- Page Done by Devanshu -->
+
+### Research question
+
+Our goal is to classify the likelihood of hospitalization for asthma as either 'High' or 'Low' based on demographic and geographic data. This model can help identifying demographic and geographic trends in asthma hospitalizations. We are going to use gender and location data for this.
+### Data Preprocessing
+
+First we filter the dataset to focus on hospitalizations due to asthma. Since our outcome variable will be based on hospitalization rates, we need to ensure the `DataValue` column is formatted correctly. Therefore, we first convert `DataValue` from text to numeric format for analysis. 
+
+Next, we make a binary variable called `Hospitalization_Likelihood`for classification. This variable classifies each entry as either “High” or “Low” based on whether the hospitalization rate is above or below the median value. Specifically, data points with `DataValue` greater than or equal to the median are labeled "High," while those below the median are labeled "Low."
+
+After creating the target variable, we convert the categorical predictors into a format that can be processed by the k-NN algorithm. Both `LocationAbbr`(state) and `Stratification1`(gender) are converted into numeric factors. This allows the k-NN algorithm to interpret the categorical variables.
+
+Finally, we divide the data into training and testing sets. By setting aside 70% of the data for training and the remaining 30% for testing, we can train the k-NN model and then assess the performance.
+
+```{r echo=FALSE}
+
+asthma_data <- data[data$Topic == "Asthma" & data$Question == "Hospitalizations for asthma", ]
+
+asthma_data$DataValue <- as.numeric(asthma_data$DataValue)
+median_value <- median(asthma_data$DataValue, na.rm = TRUE)
+asthma_data$Hospitalization_Likelihood <- ifelse(asthma_data$DataValue >= median_value, "High", "Low")
+asthma_data$Hospitalization_Likelihood <- as.factor(asthma_data$Hospitalization_Likelihood)
+
+# Remove rows with NA in Hospitalization_Likelihood
+asthma_data <- asthma_data[!is.na(asthma_data$Hospitalization_Likelihood), ]
+
+# predictors and target for k-NN
+asthma_data$LocationAbbr <- as.numeric(factor(asthma_data$LocationAbbr))
+asthma_data$Stratification1 <- as.numeric(factor(asthma_data$Stratification1))
+
+# training and test sets
+set.seed(123)
+train_indices <- sample(1:nrow(asthma_data), size = floor(0.7 * nrow(asthma_data)), replace = FALSE)
+train_data <- asthma_data[train_indices, ]
+test_data <- asthma_data[-train_indices, ]
+
+train_predictors <- train_data[, c("LocationAbbr", "Stratification1")]
+test_predictors <- test_data[, c("LocationAbbr", "Stratification1")]
+train_target <- train_data$Hospitalization_Likelihood
+test_target <- test_data$Hospitalization_Likelihood
+
+```
+### Selecting the optimal k value
+
+Now that the data is prepared, the next step is to determine the optimal value of k which is the number of neighbors in the classification process. We iterate over a range of values for k, from 1 to 15, to identify which value yields the highest accuracy. For each value of k, we apply the k-NN model to the test data and get the resulting accuracy. This helps us get the k value with the heighest accuracy.
+
+```{r}
+# multiple k values 
+k_values <- 1:15
+accuracy_results <- sapply(k_values, function(k) {
+  predicted <- knn(train = train_predictors, test = test_predictors, cl = train_target, k = k)
+  mean(predicted == test_target)
+})
+```
+
+### k value accuracy graph
+
+```{r echo=FALSE}
+library(ggplot2)
+accuracy_df <- data.frame(k_values, accuracy_results)
+ggplot(accuracy_df, aes(x = k_values, y = accuracy_results)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Accuracy vs. k-Value", x = "k-Value", y = "Accuracy")
+
+# optimal k based on accuracy
+best_k <- k_values[which.max(accuracy_results)]
+
+```
+
+
+### Model evaluation
+
+Using the optimal k value identified, we now train the final k-NN model and evaluate its performance on the test set. To evaluate the confusion matrix, which shows the number of correct and incorrect classifications for each category is outputted. Additionally, the confusion matrix allows us to calculate key performance metrics such as accuracy, sensitivity, and specificity.
+
+The overall accuracy indicates the proportion of correct predictions made by the model, while sensitivity shows how well the model identifies cases labeled as "High." Specificity reveals the model's ability to correctly identify cases labeled as "Low." By getting these values, we can judge the strengths and weaknesses of the model.
+
+```{r echo=FALSE}
+# Train
+final_knn <- knn(train = train_predictors, test = test_predictors, cl = train_target, k = best_k)
+
+# Confusion matrix and accuracy metrics
+confusion_matrix <- confusionMatrix(final_knn, test_target)
+print(confusion_matrix)
+
+# Display accuracy
+cat("Accuracy with k =", best_k, ":", confusion_matrix$overall['Accuracy'], "\n")
+
+```
+### Results and Analysis 
+
+The analysis shows that the optimal value of k for this model is 6, which achieved the highest accuracy during testing. The final model’s confusion matrix shows that it correctly classifies approximately 66.67% of cases. This accuracy suggests moderate predictive capability, with the model performing well at distinguishing between "High" and "Low" hospitalization likelihood, especially for the "Low" class.
+
+The sensitivity metric shows that the model identifies around 56.61% of the "High" likelihood cases, while the specificity metric of 76.25% shows it performs well at correctly identifying "Low" likelihood cases. Additionally, the positive predictive value for the "High" class is 69.45%, meaning the model is correct about 69% of the time when predicting "High" likelihood of hospitalization.
+
+In summary, even though the kNN model shows moderate accuracy, it can still be increased in its ability to identify "High" likelihood cases. Moreover with more cases likely labeled "Low" than "High," could bias the model's predictions.
+
+
+
+Naive Bayes Classification
+===================================== 
+<!-- Page Done by Devanshu -->
+  
+### Research Question
+
+Can demographic and geographic factors predict whether mortality from cardiovascular diseases in the U.S. will be high or low?
+
+In this section, we aim to answer this question by classifying mortality rates as either "High" or "Low" based on two variables: LocationAbbr and Stratification1. By creating a Naive Bayes model, we are trying to see if these factors have predictive power over cardiovascular disease mortality rates.
+
+
+### Data Preprocessing
+
+First we filter the dataset to include only entries relevant to mortality from cardiovascular diseases. We do this by selecting rows where `Topic` is "Cardiovascular Disease" and `Question` refers to "Mortality from total cardiovascular diseases".
+
+Next, we set the target variable, `Mortality_Rate`, which is the mortality rate as either "High" or "Low". This binary outcome is based on the median mortality rate in the dataset. Entries with a `DataValue` greater than or equal to the median are labeled as "High," and those below the median are "Low." Converting the target variable into this binary classification enables the Naive Bayes model to distinguish between high and low mortality risk.
+
+After setting `Mortality_Rate`, we proceed by converting `LocationAbbr` and `Stratification1` into numeric factors. This transformation is needed for the Naive Bayes algorithm, which requires all predictors to be in numeric format. By assigning numeric levels to these categorical variables, we ensure compatibility with the modeling process.
+
+Finally, we split the data into training and testing sets, reserving 70% of the dataset for training and the remaining 30% for testing.
+
+```{r echo=FALSE}
+
+# Filter dataset 
+cvd_data <- data[data$Topic == "Cardiovascular Disease" & data$Question == "Mortality from total cardiovascular diseases", ]
+# target
+cvd_data$DataValue <- as.numeric(cvd_data$DataValue)
+median_cvd <- median(cvd_data$DataValue, na.rm = TRUE)
+cvd_data$Mortality_Rate <- ifelse(cvd_data$DataValue >= median_cvd, "High", "Low")
+cvd_data$Mortality_Rate <- as.factor(cvd_data$Mortality_Rate)
+
+# Remove NAs
+cvd_data <- cvd_data[!is.na(cvd_data$Mortality_Rate), ]
+
+```
+```{r echo=FALSE}
+# Convert categorical predictors to numeric factors 
+cvd_data$LocationAbbr <- as.numeric(factor(cvd_data$LocationAbbr))
+cvd_data$Stratification1 <- as.numeric(factor(cvd_data$Stratification1))
+```
+
+### Model Training
+
+With the data prepared, we proceed to train the Naive Bayes model. Using Mortality_Rate as the target variable and LocationAbbr and Stratification1 as predictors, the model gives the likelihood of each class (High or Low) given the predictor values. Naive Bayes is well-suited for this type of classification task, as it leverages probability distributions of each predictor within each class to make predictions.
+
+```{r echo=FALSE}
+# training and test 
+set.seed(123)
+train_indices_cvd <- sample(1:nrow(cvd_data), size = floor(0.7 * nrow(cvd_data)), replace = FALSE)
+train_data_cvd <- cvd_data[train_indices_cvd, ]
+test_data_cvd <- cvd_data[-train_indices_cvd, ]
+
+# Check distribution 
+cat("Training set class distribution:\n")
+print(table(train_data_cvd$Mortality_Rate))
+cat("Test set class distribution:\n")
+print(table(test_data_cvd$Mortality_Rate))
+
+```
+
+```{r echo=FALSE}
+# Train model
+nb_model_cvd <- naiveBayes(Mortality_Rate ~ LocationAbbr + Stratification1, data = train_data_cvd)
+  
+# Predict on the test set
+nb_predictions_cvd <- predict(nb_model_cvd, test_data_cvd)
+
+# Ensure they match
+test_data_cvd$Mortality_Rate <- factor(test_data_cvd$Mortality_Rate, levels = levels(train_data_cvd$Mortality_Rate))
+
+```
+### Model evaluation
+To meansure the performance of our Naive Bayes model, we get the confusion matrix. This matrix provides a breakdown of the model’s correct and incorrect predictions, organized by each class. In addition to accuracy, which measures the overall proportion of correct predictions, we calculate key metrics such as sensitivity (the model's ability to correctly identify high-risk cases) and specificity (its accuracy in identifying low-risk cases). These metrics offer a detailed understanding of the model’s strengths and limitations.
+
+```{r echo=FALSE}
+
+# Evaluate model performance
+nb_confusion_matrix_cvd <- confusionMatrix(nb_predictions_cvd, test_data_cvd$Mortality_Rate)
+print(nb_confusion_matrix_cvd)
+
+```
+
+### Results
+
+```{r echo=FALSE}
+overall_accuracy <- nb_confusion_matrix_cvd$overall['Accuracy']
+sensitivity <- nb_confusion_matrix_cvd$byClass['Sensitivity']
+specificity <- nb_confusion_matrix_cvd$byClass['Specificity']
+precision <- nb_confusion_matrix_cvd$byClass['Pos Pred Value']
+f1 <- nb_confusion_matrix_cvd$byClass['F1']
+
+# Display values 
+cat("Accuracy:", overall_accuracy, "\n")
+cat("Sensitivity:", sensitivity, "\n")
+cat("Specificity:", specificity, "\n")
+cat("Precision:", precision, "\n")
+cat("F1 Score:", f1, "\n")
+
+# Create a summary table to show basic statistics for high vs low mortality rates
+summary_table_cvd <- cvd_data %>%
+  group_by(Mortality_Rate) %>%
+  summarise(
+    Average_Mortality = mean(DataValue, na.rm = TRUE),
+    Unique_Locations = n_distinct(LocationAbbr)
+  ) %>%
+  rename("Mortality Rate" = Mortality_Rate, 
+         "Average Mortality" = Average_Mortality, 
+         "Unique Locations" = Unique_Locations)
+
+
+summary_table_cvd %>%
+  kable()  
+
+```
+### Analysis
+
+The Naive Bayes model achieved an accuracy of approximately 59%, indicating a moderate ability to classify high and low mortality rates from cardiovascular diseases. The sensitivity (64%) suggests that the model is relatively effective at identifying cases with high mortality rates. However, the specificity (54%) is lower, showing that it struggles to correctly identify low mortality rates, leading to a higher false positive rate.
+
+
+Logistic regression
+===================================== 
+   
+<!-- Page Done by Devanshu -->
+
+### Research Question
+
+Does alcohol-related liver disease mortality vary significantly by geographic region and demographic group?
+
+This analysis investigates whether the likelihood of mortality from alcohol-related liver disease differs based on geographic location and demographic characteristics. We approach this by fitting a logistic regression model, using MortalityRisk as the binary response variable, where we classify mortality risk as either "High" or "Low" based on the median mortality rate in each state.
+
+
+### Data Filtering
+
+First we filter the dataset to focus only on records related to mortality from alcohol-related liver disease. We accomplish this by selecting rows where the `Topic` is "Alcohol" and the `Question` specifically relates to "Chronic liver disease mortality". This filtering step ensures that we analyze only the data relevant to our research question.
+
+The `DataValue` column, which represents the mortality rate, is then converted to a numeric format. After conversion, any missing values in `DataValue` are removed to ensure the accuracy of the analysis.
+
+Next, we set our binary target variable, `MortalityRisk`, which categorizes each data entry as either "High" or "Low" risk. To create this classification, we calculate the median mortality rate and assign "High" label to regions with a rate equal to or above the median, while those below the median are labeled as "Low." Converting `MortalityRisk` into a binary factor enables the logistic regression model to predict the likelihood of high or low mortality based on the predictors.
+
+Finally, we convert `LocationAbbr` (representing the state) and `Stratification1` (indicating demographic group) into categorical variables. These factors are the model’s predictor values, allowing the logistic regression to analyze both geographic and demographic impacts on mortality risk.
+
+```{r echo=FALSE}
+
+# Filter rows for liver disease and alcohol-related indicators
+liver_disease_data <- data[data$Topic == "Alcohol" & data$Question == "Chronic liver disease mortality", ]
+
+# Convert DataValue to numeric and drop NAs
+liver_disease_data$DataValue <- as.numeric(liver_disease_data$DataValue)
+liver_disease_data <- liver_disease_data[!is.na(liver_disease_data$DataValue), ]
+
+# Create binary outcome variable for high vs. low mortality risk (above/below median)
+median_mortality <- median(liver_disease_data$DataValue, na.rm = TRUE)
+liver_disease_data$MortalityRisk <- ifelse(liver_disease_data$DataValue >= median_mortality, "High", "Low")
+liver_disease_data$MortalityRisk <- as.factor(liver_disease_data$MortalityRisk)
+
+# Ensure regions and demographic categories are factored as categorical variables
+liver_disease_data$LocationAbbr <- as.factor(liver_disease_data$LocationAbbr)
+liver_disease_data$Stratification1 <- as.factor(liver_disease_data$Stratification1)
+
+# Select relevant columns
+liver_disease_data <- liver_disease_data %>%
+  select(MortalityRisk, LocationAbbr, Stratification1)
+
+
+
+```
+### Model trianing
+
+Now that the data is ready, we train the logistic regression model. To enhance the accuracy of our results, we use the 5-fold cross-validation to divides the training data into five parts. The model is then trained on four parts while one part is used for validation. This helps preventing overfitting by ensuring the performance is evaluated on multiple partitions of the data.
+
+In this logistic regression model, MortalityRisk is the binary response variable, while LocationAbbr and Stratification1 serve as predictors. The model calculates the likelihood of high or low mortality risk based on the geographic and demographic features of each observation.
+
+```{r echo=FALSE}
+# Set up cross-validation
+train_control <- trainControl(method = "cv", number = 5) # 5-fold cross-validation
+
+# Fit logistic regression model to test interaction between geography and demographic groups
+log_reg_model <- train(
+  MortalityRisk ~ LocationAbbr + Stratification1,
+  data = liver_disease_data,
+  method = "glm",
+  family = binomial,
+  trControl = train_control
+)
+
+
+```
+
+### Results
+
+After training the model we get the confusion matrix of the model. The matrix gives a breakdown of correctly and incorrectly classified cases,giving the model’s accuracy. Moreover, we also examine the logistic regression coefficients to understand the strength and direction of the relationship between each predictor and the likelihood of high mortality risk.This tells us which geographic regions and demographic groups are more susceptible to alcohol-related liver disease mortality.
+
+```{r echo=FALSE}
+# Display the model summary
+print(log_reg_model)
+
+# Predict the mortality risk on the same dataset used in the model
+predictions <- predict(log_reg_model, liver_disease_data)
+predicted_classes <- factor(predictions, levels = c("Low", "High"))
+
+# Calculate confusion matrix
+conf_matrix <- confusionMatrix(predicted_classes, liver_disease_data$MortalityRisk)
+print(conf_matrix)
+
+# Display coefficients to understand which factors have the strongest association
+coefficients_table <- tidy(log_reg_model$finalModel)
+kable(coefficients_table, caption = "Summary of Logistic Regression Model Coefficients")
+
+```
+### Analysis
+The cross-validation results reveal an overall accuracy of approximately 65.14%. This indicates that the model provides a moderately accurate prediction of mortality risk based on geographic and demographic factors. Certain states may have higher or lower odds of mortality due to alcohol-related liver disease, reflecting geographic disparities. The Stratification1 variable shows  which demographic groups are more susceptible to high mortality risk. 
+
+From the model’s coefficients, we see variations in mortality risk across different states and demographic groups. Certain geographic areas appear to have higher odds of mortality due to alcohol-related liver disease, showing regional disparities.
+
+References
+===================================
+
+### [1]
+Articles. Cedars. (n.d.). https://www.cedars-sinai.org/health-library/diseases-and-conditions/c/colon-and-rectal-cancers.html#:~:text=Colon%20cancer%20is%20a%20cancer,cancer%20affects%20the%20digestive%20system. 
+
+### [2]
+
+Yale Medicine. (2024, July 24). Alcohol-related liver disease. Yale Medicine. https://www.yalemedicine.org/conditions/alcohol-related-liver-disease#:~:text=What%20is%20alcohol%2Drelated%20liver,symptoms%2C%20it%20can%20go%20undiagnosed. 
+
+
+### [3]
+
+Kirkendoll, S. M. (2024, May 8). Study shows alarming rise in heart failure deaths, especially among younger adults. Duke University School of Medicine. https://medschool.duke.edu/news/study-shows-alarming-rise-heart-failure-deaths-especially-among-younger-adults 
+
+
